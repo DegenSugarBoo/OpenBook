@@ -755,12 +755,23 @@ fn render_price_chart(f: &mut Frame, area: Rect, trade_history: &TradeHistory) {
     let inner = chart_block.inner(area);
     f.render_widget(chart_block, area);
     
-    if inner.width < 20 || inner.height < 3 {
+    // Reserve space for Y-axis (8 chars) and X-axis (1 row)
+    let y_axis_width: u16 = 10;
+    let x_axis_height: u16 = 1;
+    
+    if inner.width < y_axis_width + 20 || inner.height < x_axis_height + 3 {
         return; // Too small to render
     }
     
-    let chart_width = inner.width as usize;
-    let chart_height = inner.height as usize;
+    let chart_area = Rect::new(
+        inner.x + y_axis_width,
+        inner.y,
+        inner.width - y_axis_width,
+        inner.height - x_axis_height,
+    );
+    
+    let chart_width = chart_area.width as usize;
+    let chart_height = chart_area.height as usize;
     
     // Get current time
     let now_ms = std::time::SystemTime::now()
@@ -768,90 +779,87 @@ fn render_price_chart(f: &mut Frame, area: Rect, trade_history: &TradeHistory) {
         .unwrap()
         .as_millis() as u64;
     
-    // Find price range
-    let mut min_price = f64::MAX;
-    let mut max_price = f64::MIN;
-    
-    for &(_, price) in &trade_history.price_points {
-        min_price = min_price.min(price);
-        max_price = max_price.max(price);
-    }
-    for trade in &trade_history.trades {
-        min_price = min_price.min(trade.price);
-        max_price = max_price.max(trade.price);
-    }
-    
-    // Add padding to price range
-    if min_price == f64::MAX || max_price == f64::MIN {
-        // No data yet
-        let no_data = Paragraph::new("Waiting for data...")
-            .style(Style::default().fg(Color::DarkGray))
-            .alignment(ratatui::layout::Alignment::Center);
-        f.render_widget(no_data, inner);
-        return;
-    }
-    
-    let price_range = max_price - min_price;
-    let padding = if price_range > 0.0 { price_range * 0.1 } else { 0.01 };
-    min_price -= padding;
-    max_price += padding;
-    let price_range = max_price - min_price;
-    
     // Time range: last 60 seconds
     let window_ms = trade_history.window_ms;
     let time_start = now_ms.saturating_sub(window_ms);
     
+    // Filter trades in window and find price range
+    let trades_in_window: Vec<&Trade> = trade_history.trades.iter()
+        .filter(|t| t.timestamp_ms >= time_start)
+        .collect();
+    
+    if trades_in_window.is_empty() {
+        let no_data = Paragraph::new("Waiting for trades...")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(ratatui::layout::Alignment::Center);
+        f.render_widget(no_data, chart_area);
+        return;
+    }
+    
+    let min_price = trades_in_window.iter().map(|t| t.price).fold(f64::MAX, |a, b| a.min(b));
+    let max_price = trades_in_window.iter().map(|t| t.price).fold(f64::MIN, |a, b| a.max(b));
+    
+    // Add padding to price range
+    let price_range = max_price - min_price;
+    let padding = if price_range > 0.0 { price_range * 0.15 } else { max_price * 0.001 };
+    let min_price = min_price - padding;
+    let max_price = max_price + padding;
+    let price_range = max_price - min_price;
+    
     // Create a 2D grid for the chart
     let mut grid: Vec<Vec<(char, Color)>> = vec![vec![(' ', Color::Reset); chart_width]; chart_height];
     
-    // Draw price line
-    let mut last_x: Option<usize> = None;
-    let mut last_y: Option<usize> = None;
+    // Build price line from trades (using last traded price)
+    // Group trades by X position and take the last price for each
+    let mut price_by_x: Vec<Option<f64>> = vec![None; chart_width];
     
-    for &(ts, price) in &trade_history.price_points {
-        if ts < time_start {
-            continue;
-        }
-        let x = ((ts - time_start) as f64 / window_ms as f64 * (chart_width - 1) as f64) as usize;
-        let y = ((max_price - price) / price_range * (chart_height - 1) as f64) as usize;
-        
+    for trade in &trades_in_window {
+        let x = ((trade.timestamp_ms - time_start) as f64 / window_ms as f64 * (chart_width - 1) as f64) as usize;
         let x = x.min(chart_width - 1);
-        let y = y.min(chart_height - 1);
-        
-        // Draw line connecting points
-        if let (Some(lx), Some(ly)) = (last_x, last_y) {
-            // Simple line drawing between points
-            let dx = x as i32 - lx as i32;
-            let dy = y as i32 - ly as i32;
-            let steps = dx.abs().max(dy.abs()).max(1);
+        price_by_x[x] = Some(trade.price);
+    }
+    
+    // Fill gaps with previous price (forward fill)
+    let mut last_price: Option<f64> = None;
+    for i in 0..chart_width {
+        if price_by_x[i].is_some() {
+            last_price = price_by_x[i];
+        } else if last_price.is_some() {
+            price_by_x[i] = last_price;
+        }
+    }
+    
+    // Draw price line
+    let mut prev_y: Option<usize> = None;
+    for (x, price_opt) in price_by_x.iter().enumerate() {
+        if let Some(price) = price_opt {
+            let y = ((max_price - price) / price_range * (chart_height - 1) as f64) as usize;
+            let y = y.min(chart_height - 1);
             
-            for i in 0..=steps {
-                let px = (lx as i32 + dx * i / steps) as usize;
-                let py = (ly as i32 + dy * i / steps) as usize;
-                if px < chart_width && py < chart_height {
-                    if grid[py][px].0 == ' ' {
-                        grid[py][px] = ('─', Color::Cyan);
+            // Connect to previous point
+            if let Some(py) = prev_y {
+                if py != y {
+                    let (y_start, y_end) = if py < y { (py, y) } else { (y, py) };
+                    for yy in y_start..=y_end {
+                        if grid[yy][x].0 == ' ' {
+                            grid[yy][x] = ('│', Color::Cyan);
+                        }
                     }
                 }
             }
+            
+            grid[y][x] = ('─', Color::Cyan);
+            prev_y = Some(y);
         }
-        
-        grid[y][x] = ('●', Color::Cyan);
-        last_x = Some(x);
-        last_y = Some(y);
     }
     
     // Find max trade quantity for intensity scaling
-    let max_qty = trade_history.trades.iter()
+    let max_qty = trades_in_window.iter()
         .map(|t| t.quantity)
         .fold(0.0f64, |a, b| a.max(b));
     
-    // Draw trade bubbles
-    for trade in &trade_history.trades {
-        if trade.timestamp_ms < time_start {
-            continue;
-        }
-        
+    // Draw trade bubbles on top
+    for trade in &trades_in_window {
         let x = ((trade.timestamp_ms - time_start) as f64 / window_ms as f64 * (chart_width - 1) as f64) as usize;
         let y = ((max_price - trade.price) / price_range * (chart_height - 1) as f64) as usize;
         
@@ -860,23 +868,23 @@ fn render_price_chart(f: &mut Frame, area: Rect, trade_history: &TradeHistory) {
         
         // Determine bubble character based on size
         let qty_ratio = if max_qty > 0.0 { trade.quantity / max_qty } else { 0.5 };
-        let bubble_char = if qty_ratio > 0.7 {
+        let bubble_char = if qty_ratio > 0.6 {
             '●'
-        } else if qty_ratio > 0.3 {
+        } else if qty_ratio > 0.2 {
             '•'
         } else {
             '·'
         };
         
-        // Determine color based on buy/sell with intensity
+        // Color based on buy/sell with intensity
         let (base_r, base_g, base_b) = if trade.is_buy {
-            (0u8, 180u8, 0u8) // Green for buy
+            (50u8, 255u8, 50u8) // Green for buy
         } else {
-            (180u8, 0u8, 0u8) // Red for sell
+            (255u8, 50u8, 50u8) // Red for sell
         };
         
         // Increase intensity for larger trades
-        let intensity = 0.5 + qty_ratio * 0.5;
+        let intensity = 0.6 + qty_ratio * 0.4;
         let r = (base_r as f64 * intensity).min(255.0) as u8;
         let g = (base_g as f64 * intensity).min(255.0) as u8;
         let b = (base_b as f64 * intensity).min(255.0) as u8;
@@ -884,7 +892,34 @@ fn render_price_chart(f: &mut Frame, area: Rect, trade_history: &TradeHistory) {
         grid[y][x] = (bubble_char, Color::Rgb(r, g, b));
     }
     
-    // Render the grid
+    // Render Y-axis (price labels)
+    let y_axis_area = Rect::new(inner.x, inner.y, y_axis_width, chart_area.height);
+    for row in 0..chart_height {
+        let price = max_price - (row as f64 / (chart_height - 1).max(1) as f64) * price_range;
+        let label = if row == 0 || row == chart_height - 1 || row == chart_height / 2 {
+            format!("{:>9.2}", price)
+        } else {
+            " ".repeat(y_axis_width as usize)
+        };
+        let label_para = Paragraph::new(label)
+            .style(Style::default().fg(Color::DarkGray));
+        f.render_widget(label_para, Rect::new(y_axis_area.x, y_axis_area.y + row as u16, y_axis_width, 1));
+    }
+    
+    // Render X-axis (time labels)
+    let x_axis_y = inner.y + inner.height - x_axis_height;
+    let time_labels = format!(
+        "{:<10}{:^width$}{:>10}",
+        "-60s",
+        "-30s", 
+        "now",
+        width = (chart_width - 20).max(0)
+    );
+    let x_axis_para = Paragraph::new(time_labels)
+        .style(Style::default().fg(Color::DarkGray));
+    f.render_widget(x_axis_para, Rect::new(chart_area.x, x_axis_y, chart_area.width, 1));
+    
+    // Render the chart grid
     for (row_idx, row) in grid.iter().enumerate() {
         let mut spans: Vec<Span> = Vec::new();
         
@@ -898,7 +933,7 @@ fn render_price_chart(f: &mut Frame, area: Rect, trade_history: &TradeHistory) {
         let line = Line::from(spans);
         f.render_widget(
             Paragraph::new(line),
-            Rect::new(inner.x, inner.y + row_idx as u16, inner.width, 1)
+            Rect::new(chart_area.x, chart_area.y + row_idx as u16, chart_area.width, 1)
         );
     }
 }
