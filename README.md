@@ -87,6 +87,12 @@ Binance WS ──► parse ──► mpsc channel ──► sync engine ──�
 | `ordered-float` | `BTreeMap` keys for price levels |
 | `futures-util` | Stream combinators |
 
+## Known Issues
+
+- The trades are not properly displayed
+- The volume plots are also not good 
+- I am looking to go the full gui route,cause I do not know how to improve the terminal ui more
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).

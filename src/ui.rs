@@ -143,7 +143,7 @@ pub fn ui(f: &mut Frame, app: &App, book: &OrderBook, stats: &ProfilingStats, tr
         .split(header_ob_chunks[0]);
     
     let bid_depth_header = Paragraph::new("CUM.DEPTH")
-        .style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().fg(Color::Rgb(140, 140, 140)))
         .alignment(ratatui::layout::Alignment::Right);
     f.render_widget(bid_depth_header, bid_header_chunks[0]);
     
@@ -176,7 +176,7 @@ pub fn ui(f: &mut Frame, app: &App, book: &OrderBook, stats: &ProfilingStats, tr
     f.render_widget(ask_qty_header, ask_header_chunks[1]);
     
     let ask_depth_header = Paragraph::new("CUM.DEPTH")
-        .style(Style::default().fg(Color::DarkGray));
+        .style(Style::default().fg(Color::Rgb(140, 140, 140)));
     f.render_widget(ask_depth_header, ask_header_chunks[2]);
     
     // Render bids side
@@ -223,7 +223,7 @@ pub fn ui(f: &mut Frame, app: &App, book: &OrderBook, stats: &ProfilingStats, tr
     // Update ID
     let update_id_text = Line::from(vec![
         Span::raw("Update ID: "),
-        Span::styled(format!("{}", book.last_update_id), Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{}", book.last_update_id), Style::default().fg(Color::Rgb(140, 140, 140))),
     ]);
     let update_id_para = Paragraph::new(update_id_text)
         .alignment(ratatui::layout::Alignment::Center);
@@ -237,7 +237,7 @@ pub fn ui(f: &mut Frame, app: &App, book: &OrderBook, stats: &ProfilingStats, tr
         "Book size: {} bids, {} asks │ Press 'q' or Ctrl+C to exit",
         book.bids.len(), book.asks.len()
     ))
-    .style(Style::default().fg(Color::DarkGray))
+    .style(Style::default().fg(Color::Rgb(140, 140, 140)))
     .alignment(ratatui::layout::Alignment::Center);
     f.render_widget(footer, chunks[7]);
 }
@@ -446,7 +446,7 @@ fn render_price_chart(f: &mut Frame, area: Rect, trade_history: &TradeHistory) {
     
     if trades_in_window.is_empty() {
         let no_data = Paragraph::new("Waiting for trades...")
-            .style(Style::default().fg(Color::DarkGray))
+            .style(Style::default().fg(Color::Rgb(140, 140, 140)))
             .alignment(ratatui::layout::Alignment::Center);
         f.render_widget(no_data, inner);
         return;
@@ -571,7 +571,7 @@ fn render_price_chart(f: &mut Frame, area: Rect, trade_history: &TradeHistory) {
         } else {
             " ".repeat(y_axis_width as usize)
         };
-        let label_para = Paragraph::new(label).style(Style::default().fg(Color::DarkGray));
+        let label_para = Paragraph::new(label).style(Style::default().fg(Color::Rgb(140, 140, 140)));
         f.render_widget(label_para, Rect::new(y_axis_x, inner.y + row as u16, y_axis_width, 1));
     }
     
@@ -594,7 +594,7 @@ fn render_price_chart(f: &mut Frame, area: Rect, trade_history: &TradeHistory) {
     // Draw a separator line
     let separator = "─".repeat(chart_width);
     f.render_widget(
-        Paragraph::new(separator).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(separator).style(Style::default().fg(Color::Rgb(140, 140, 140))),
         Rect::new(chart_x, volume_y, chart_width as u16, 1)
     );
     
@@ -630,7 +630,7 @@ fn render_price_chart(f: &mut Frame, area: Rect, trade_history: &TradeHistory) {
     // Volume axis label
     let vol_label = "VOL";
     f.render_widget(
-        Paragraph::new(vol_label).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(vol_label).style(Style::default().fg(Color::Rgb(140, 140, 140))),
         Rect::new(y_axis_x + y_axis_width - 4, volume_y + 1, 4, 1)
     );
     
@@ -643,6 +643,6 @@ fn render_price_chart(f: &mut Frame, area: Rect, trade_history: &TradeHistory) {
         "now",
         width = chart_width.saturating_sub(24)
     );
-    let x_axis_para = Paragraph::new(time_labels).style(Style::default().fg(Color::DarkGray));
+    let x_axis_para = Paragraph::new(time_labels).style(Style::default().fg(Color::Rgb(140, 140, 140)));
     f.render_widget(x_axis_para, Rect::new(chart_x, x_axis_y, chart_width as u16, 1));
 }
