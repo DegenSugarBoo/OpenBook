@@ -14,4 +14,14 @@ debug/
 .DS_Store
 Thumbs.db
 
+# AI agent config
+CLAUDE.md
+AGENTS.md
+.claude/
+
+#my files
+
+PLAN.md
+to_do.md
+
 # Cargo lock is intentional for binaries — keep it tracked
