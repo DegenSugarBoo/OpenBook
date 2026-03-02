@@ -1,8 +1,8 @@
-# cli_ob — Real-Time Crypto Order Book GUI
+# OpenBook : Real-Time Crypto Order Book GUI
 
 A high-performance, Rust desktop app for visualizing **Binance Futures** market microstructure in real time. It streams live depth + trade data, renders a Bookmap-style depth heatmap, and includes dockable analytics panes for order flow and execution impact.
 
-<video src="assets/demo.mov" controls></video>
+![Preview of the app showing the heatmap, order book, trade tape, and market impact panes](assets/preview.png)
 
 ---
 
