@@ -263,11 +263,31 @@ async fn ticker_ws_loop(
 
 fn apply_depth_update(state: &mut SharedState, update: &WsDepthUpdate) {
     let tick_size = state.tick_size;
-    state.order_book.apply_update(update);
+    let deltas = state.order_book.apply_update_with_deltas(update);
+    state
+        .order_book
+        .prune_to_max_levels(ORDER_BOOK_MAX_LEVELS_PER_SIDE);
     state.depth_epoch = state.depth_epoch.wrapping_add(1);
     state
         .micro_metrics
         .on_depth_epoch_advance(update.event_time, state.depth_epoch, tick_size);
+
+    // Push event into depth history immediately (event-driven, no 500ms sampling)
+    if !deltas.is_empty() {
+        let SharedState {
+            depth_history,
+            order_book,
+            depth_history_epoch,
+            ..
+        } = state;
+        depth_history.push_event(
+            update.event_time,
+            update.final_update_id,
+            deltas,
+            order_book,
+        );
+        *depth_history_epoch = depth_history_epoch.wrapping_add(1);
+    }
 }
 
 fn can_bridge_snapshot(update: &WsDepthUpdate, snapshot_id: u64) -> bool {
@@ -371,6 +391,7 @@ async fn ws_loop(
                                         ) {
                                             let trade = Trade {
                                                 timestamp_ms: agg_trade.trade_time,
+                                                received_at_ms: current_time_ms_u64(),
                                                 price,
                                                 quantity: qty,
                                                 is_buy: !agg_trade.is_buyer_maker,
@@ -484,8 +505,18 @@ async fn ws_loop(
         state.tick_size = tick_size;
         state.price_decimals = price_decimals;
         state.depth_epoch = 0;
-        state.depth_slice_epoch = 0;
+        state.depth_history_epoch = 0;
         state.trade_epoch = 0;
+        {
+            let now = current_time_ms_u64();
+            let uid = snapshot_update_id;
+            let SharedState {
+                depth_history,
+                order_book,
+                ..
+            } = &mut *state;
+            depth_history.reset_from_book(order_book, now, uid);
+        }
         state.micro_metrics.reset_fill_kill();
         state.sync_micro_epochs();
         state.connected = false;
@@ -613,28 +644,21 @@ async fn ws_loop(
             *cumulative_epoch = micro_metrics.cumulative_epoch;
         }
 
-        // Sample depth/fill-kill history.
+        // Prune histories and flush micro metrics.
         let now_ms = current_time_ms_u64();
         {
             let mut state = shared.lock().unwrap();
             if synced {
-                if now_ms.saturating_sub(state.depth_history.last_sample_ms)
-                    >= state.depth_history.sample_interval_ms
-                {
-                    let SharedState {
-                        order_book,
-                        depth_history,
-                        ..
-                    } = &mut *state;
-                    depth_history.push_from_book(order_book, now_ms);
-                    state.depth_slice_epoch = state.depth_slice_epoch.wrapping_add(1);
-                    state.depth_history.last_sample_ms = now_ms;
+                if state.trade_history.prune_now(now_ms) > 0 {
+                    state.trade_epoch = state.trade_epoch.wrapping_add(1);
                 }
+                state.depth_history.prune(now_ms);
                 let depth_epoch = state.depth_epoch;
                 let tick_size = state.tick_size;
                 state
                     .micro_metrics
                     .flush_fill_kill_if_needed(now_ms, depth_epoch, tick_size);
+                state.micro_metrics.prune_rolling_window(now_ms);
                 state.micro_metrics.sample_cumulative(now_ms);
                 state.sync_micro_epochs();
             }

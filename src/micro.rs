@@ -3,7 +3,7 @@ use ordered_float::OrderedFloat;
 use std::collections::{BTreeMap, VecDeque};
 
 const FILL_KILL_MAX_SAMPLES: usize = 10_000;
-pub const ROLLING_WINDOW_MS: u64 = 300_000;
+pub const ROLLING_WINDOW_MS: u64 = 180_000;
 const CUMULATIVE_MAX_SAMPLES: usize = 10_000;
 const CUMULATIVE_CARRY_FORWARD_INTERVAL_MS: u64 = 500;
 const BURST_MAX_GAP_MS: u64 = 80;
@@ -132,6 +132,15 @@ pub struct FillKillHistory {
     pub samples: VecDeque<FillKillSample>,
     pub max_samples: usize,
     active_burst: Option<BurstState>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PrunedFillKillTotals {
+    fill_qty: f64,
+    kill_qty: f64,
+    event_count: u64,
+    overfill_count: u64,
+    removed_samples: usize,
 }
 
 impl Default for FillKillHistory {
@@ -279,6 +288,26 @@ impl FillKillHistory {
             self.samples.pop_front();
         }
     }
+
+    fn prune_window(&mut self, now_ms: u64, window_ms: u64) -> PrunedFillKillTotals {
+        let cutoff = now_ms.saturating_sub(window_ms);
+        let mut pruned = PrunedFillKillTotals::default();
+        while let Some(front) = self.samples.front() {
+            if front.timestamp_ms < cutoff {
+                let removed = self.samples.pop_front().expect("front exists");
+                pruned.fill_qty += removed.fill_qty;
+                pruned.kill_qty += removed.kill_qty;
+                pruned.event_count = pruned.event_count.saturating_add(1);
+                if removed.overfill {
+                    pruned.overfill_count = pruned.overfill_count.saturating_add(1);
+                }
+                pruned.removed_samples += 1;
+            } else {
+                break;
+            }
+        }
+        pruned
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -352,6 +381,44 @@ impl MicroMetrics {
         }
 
         self.append_cumulative_sample(now_ms);
+    }
+
+    pub fn prune_rolling_window(&mut self, now_ms: u64) {
+        let pruned = self
+            .fill_kill_history
+            .prune_window(now_ms, ROLLING_WINDOW_MS);
+        if pruned.removed_samples > 0 {
+            self.cum_fill_qty = normalize_non_negative(self.cum_fill_qty - pruned.fill_qty);
+            self.cum_kill_qty = normalize_non_negative(self.cum_kill_qty - pruned.kill_qty);
+            self.cum_event_count = self.cum_event_count.saturating_sub(pruned.event_count);
+            self.cum_overfill_count = self
+                .cum_overfill_count
+                .saturating_sub(pruned.overfill_count);
+            if self.cum_overfill_count > self.cum_event_count {
+                self.cum_overfill_count = self.cum_event_count;
+            }
+            for sample in &mut self.cumulative_history.samples {
+                sample.cum_fill_qty = normalize_non_negative(sample.cum_fill_qty - pruned.fill_qty);
+                sample.cum_kill_qty = normalize_non_negative(sample.cum_kill_qty - pruned.kill_qty);
+                sample.cum_net_qty = sample.cum_fill_qty - sample.cum_kill_qty;
+                sample.cum_ratio =
+                    compute_fill_kill_ratio(sample.cum_fill_qty, sample.cum_kill_qty);
+            }
+            self.fill_kill_epoch = self.fill_kill_epoch.wrapping_add(1);
+            self.cumulative_epoch = self.cumulative_epoch.wrapping_add(1);
+        }
+
+        let initial_cumulative_len = self.cumulative_history.samples.len();
+        self.cumulative_history
+            .trim_window(now_ms, ROLLING_WINDOW_MS);
+        if self.cumulative_history.samples.len() != initial_cumulative_len {
+            self.cumulative_epoch = self.cumulative_epoch.wrapping_add(1);
+        }
+        self.last_cumulative_sample_ms = self
+            .cumulative_history
+            .latest()
+            .map(|sample| sample.timestamp_ms)
+            .unwrap_or(0);
     }
 
     pub fn kpi_snapshot(&self) -> FillKillKpis {
@@ -477,6 +544,14 @@ fn sanitize_qty(value: f64) -> f64 {
     }
 }
 
+fn normalize_non_negative(value: f64) -> f64 {
+    if !value.is_finite() || value <= RATIO_EPS {
+        0.0
+    } else {
+        value
+    }
+}
+
 fn touch_price(book: &OrderBook, direction: BurstDirection) -> Option<f64> {
     match direction {
         BurstDirection::Buy => book.best_ask().map(|(price, _)| price),
@@ -597,6 +672,7 @@ mod tests {
     fn make_trade(timestamp_ms: u64, price: f64, quantity: f64, is_buy: bool) -> Trade {
         Trade {
             timestamp_ms,
+            received_at_ms: timestamp_ms,
             price,
             quantity,
             is_buy,
@@ -620,6 +696,11 @@ mod tests {
             signed_log_ratio: compute_signed_log_ratio(fill_qty, kill_qty),
             overfill,
         }
+    }
+
+    fn record_sample(metrics: &mut MicroMetrics, sample: FillKillSample) {
+        metrics.fill_kill_history.samples.push_back(sample.clone());
+        metrics.on_fill_kill_sample(&sample);
     }
 
     #[test]
@@ -846,6 +927,71 @@ mod tests {
     }
 
     #[test]
+    fn prune_rolling_window_keeps_cutoff_sample_and_updates_kpis() {
+        let mut metrics = MicroMetrics::default();
+        record_sample(&mut metrics, make_sample(1_000, 3.0, 1.0, false));
+        metrics.sample_cumulative(1_500);
+        record_sample(&mut metrics, make_sample(2_000, 2.0, 1.0, true));
+        metrics.sample_cumulative(2_500);
+        record_sample(&mut metrics, make_sample(250_000, 4.0, 2.0, false));
+        metrics.sample_cumulative(250_500);
+
+        let fill_epoch_before = metrics.fill_kill_epoch;
+        let cumulative_epoch_before = metrics.cumulative_epoch;
+
+        metrics.prune_rolling_window(302_000);
+
+        assert_eq!(metrics.fill_kill_history.samples.len(), 1);
+        assert_eq!(
+            metrics
+                .fill_kill_history
+                .samples
+                .front()
+                .expect("first sample")
+                .timestamp_ms,
+            250_000
+        );
+        assert_close(metrics.cum_fill_qty, 4.0, 1e-12);
+        assert_close(metrics.cum_kill_qty, 2.0, 1e-12);
+        assert_eq!(metrics.cum_event_count, 1);
+        assert_eq!(metrics.cum_overfill_count, 0);
+        assert!(metrics
+            .cumulative_history
+            .samples
+            .iter()
+            .all(|sample| sample.timestamp_ms >= 250_000));
+        let latest = metrics.cumulative_history.latest().expect("latest");
+        assert_close(latest.cum_fill_qty, 4.0, 1e-12);
+        assert_close(latest.cum_kill_qty, 2.0, 1e-12);
+        assert!(metrics.fill_kill_epoch > fill_epoch_before);
+        assert!(metrics.cumulative_epoch > cumulative_epoch_before);
+    }
+
+    #[test]
+    fn prune_rolling_window_expires_all_data_and_resets_kpis() {
+        let mut metrics = MicroMetrics::default();
+        record_sample(&mut metrics, make_sample(1_000, 2.0, 1.0, true));
+        metrics.sample_cumulative(1_500);
+        record_sample(&mut metrics, make_sample(2_000, 1.0, 1.0, false));
+        metrics.sample_cumulative(2_500);
+
+        metrics.prune_rolling_window(700_000);
+
+        assert!(metrics.fill_kill_history.samples.is_empty());
+        assert!(metrics.cumulative_history.samples.is_empty());
+        assert_close(metrics.cum_fill_qty, 0.0, 1e-12);
+        assert_close(metrics.cum_kill_qty, 0.0, 1e-12);
+        assert_eq!(metrics.cum_event_count, 0);
+        assert_eq!(metrics.cum_overfill_count, 0);
+        let kpis = metrics.kpi_snapshot();
+        assert_close(kpis.cum_fill_qty, 0.0, 1e-12);
+        assert_close(kpis.cum_kill_qty, 0.0, 1e-12);
+        assert_eq!(kpis.cum_ratio, RatioValue::Na);
+        assert_eq!(kpis.cum_event_count, 0);
+        assert_eq!(kpis.cum_overfill_count, 0);
+    }
+
+    #[test]
     fn rolling_window_trim_helper_is_non_destructive_when_used_on_clone() {
         let mut canonical = CumulativeHistory::default();
         canonical.push(CumulativeSample {
@@ -874,10 +1020,10 @@ mod tests {
         rolling.trim_window(400_000, ROLLING_WINDOW_MS);
 
         assert_eq!(canonical.samples.len(), 3);
-        assert_eq!(rolling.samples.len(), 2);
+        assert_eq!(rolling.samples.len(), 1);
         assert_eq!(
             rolling.samples.front().expect("first").timestamp_ms,
-            100_000
+            400_000
         );
     }
 }
